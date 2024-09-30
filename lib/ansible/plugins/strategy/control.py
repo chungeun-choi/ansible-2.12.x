@@ -378,4 +378,4 @@ class StrategyModule(LinearStrategyModule):
         # run the base class run() method, which executes the cleanup function
         # and runs any outstanding handlers which have been triggered
 
-        return super(StrategyModule, self).run(iterator, play_context, result)
+        return super(StrategyModule, self).run(iterator, play_context)
