@@ -16,6 +16,7 @@
 # along with Ansible.  If not, see <http://www.gnu.org/licenses/>.
 # Make coding more python3-ish
 from __future__ import (absolute_import, division, print_function)
+
 __metaclass__ = type
 
 import time
@@ -26,8 +27,13 @@ from ansible import constants as C
 from ansible.errors import AnsibleError
 from ansible.module_utils._text import to_text
 from ansible.playbook.included_file import IncludedFile
+from ansible.executor.play_iterator import PlayIterator
+from ansible.module_utils.six import iteritems
+from ansible.errors import AnsibleError, AnsibleAssertionError
+from ansible.playbook.block import Block
+from ansible.playbook.task import Task
 from ansible.plugins.loader import action_loader
-from ansible.plugins.strategy.linear import StrategyModule as LinearStrategyModule
+from ansible.plugins.strategy import StrategyBase
 from ansible.template import Templar
 from ansible.utils.display import Display
 
@@ -68,15 +74,165 @@ class StateManager:
         else:
             raise Exception("Invalid state for queueing state")
 
-class StrategyModule(LinearStrategyModule):
+
+class StrategyModule(StrategyBase):
     """
     The Control strategy module is mostly identical to the Linear strategy. If a task receives
     a new control command through the state_queue, the control will be executed after the next
     task. This is to ensure reliable control over the triggered task.
     """
+
     def __init__(self, tqm):
         super(StrategyModule, self).__init__(tqm)
         self._run_state = State.RUN
+        self.noop_task = None
+
+    def _replace_with_noop(self, target):
+        if self.noop_task is None:
+            raise AnsibleAssertionError('strategy.linear.StrategyModule.noop_task is None, need Task()')
+
+        result = []
+        for el in target:
+            if isinstance(el, Task):
+                result.append(self.noop_task)
+            elif isinstance(el, Block):
+                result.append(self._create_noop_block_from(el, el._parent))
+        return result
+
+    def _create_noop_block_from(self, original_block, parent):
+        noop_block = Block(parent_block=parent)
+        noop_block.block = self._replace_with_noop(original_block.block)
+        noop_block.always = self._replace_with_noop(original_block.always)
+        noop_block.rescue = self._replace_with_noop(original_block.rescue)
+
+        return noop_block
+
+    def _prepare_and_create_noop_block_from(self, original_block, parent, iterator):
+        self.noop_task = Task()
+        self.noop_task.action = 'meta'
+        self.noop_task.args['_raw_params'] = 'noop'
+        self.noop_task.implicit = True
+        self.noop_task.set_loader(iterator._play._loader)
+
+        return self._create_noop_block_from(original_block, parent)
+
+    def _get_next_task_lockstep(self, hosts, iterator):
+        '''
+        Returns a list of (host, task) tuples, where the task may
+        be a noop task to keep the iterator in lock step across
+        all hosts.
+        '''
+
+        noop_task = Task()
+        noop_task.action = 'meta'
+        noop_task.args['_raw_params'] = 'noop'
+        noop_task.implicit = True
+        noop_task.set_loader(iterator._play._loader)
+
+        host_tasks = {}
+        display.debug("building list of next tasks for hosts")
+        for host in hosts:
+            host_tasks[host.name] = iterator.get_next_task_for_host(host, peek=True)
+        display.debug("done building task lists")
+
+        num_setups = 0
+        num_tasks = 0
+        num_rescue = 0
+        num_always = 0
+
+        display.debug("counting tasks in each state of execution")
+        host_tasks_to_run = [(host, state_task)
+                             for host, state_task in iteritems(host_tasks)
+                             if state_task and state_task[1]]
+
+        if host_tasks_to_run:
+            try:
+                lowest_cur_block = min(
+                    (iterator.get_active_state(s).cur_block for h, (s, t) in host_tasks_to_run
+                     if s.run_state != PlayIterator.ITERATING_COMPLETE))
+            except ValueError:
+                lowest_cur_block = None
+        else:
+            # empty host_tasks_to_run will just run till the end of the function
+            # without ever touching lowest_cur_block
+            lowest_cur_block = None
+
+        for (k, v) in host_tasks_to_run:
+            (s, t) = v
+
+            s = iterator.get_active_state(s)
+            if s.cur_block > lowest_cur_block:
+                # Not the current block, ignore it
+                continue
+
+            if s.run_state == PlayIterator.ITERATING_SETUP:
+                num_setups += 1
+            elif s.run_state == PlayIterator.ITERATING_TASKS:
+                num_tasks += 1
+            elif s.run_state == PlayIterator.ITERATING_RESCUE:
+                num_rescue += 1
+            elif s.run_state == PlayIterator.ITERATING_ALWAYS:
+                num_always += 1
+        display.debug("done counting tasks in each state of execution:\n\tnum_setups: %s\n\tnum_tasks: %s\n\tnum_rescue: %s\n\tnum_always: %s" % (num_setups,
+                                                                                                                                                  num_tasks,
+                                                                                                                                                  num_rescue,
+                                                                                                                                                  num_always))
+
+        def _advance_selected_hosts(hosts, cur_block, cur_state):
+            '''
+            This helper returns the task for all hosts in the requested
+            state, otherwise they get a noop dummy task. This also advances
+            the state of the host, since the given states are determined
+            while using peek=True.
+            '''
+            # we return the values in the order they were originally
+            # specified in the given hosts array
+            rvals = []
+            display.debug("starting to advance hosts")
+            for host in hosts:
+                host_state_task = host_tasks.get(host.name)
+                if host_state_task is None:
+                    continue
+                (s, t) = host_state_task
+                s = iterator.get_active_state(s)
+                if t is None:
+                    continue
+                if s.run_state == cur_state and s.cur_block == cur_block:
+                    new_t = iterator.get_next_task_for_host(host)
+                    rvals.append((host, t))
+                else:
+                    rvals.append((host, noop_task))
+            display.debug("done advancing hosts to next task")
+            return rvals
+
+        # if any hosts are in ITERATING_SETUP, return the setup task
+        # while all other hosts get a noop
+        if num_setups:
+            display.debug("advancing hosts in ITERATING_SETUP")
+            return _advance_selected_hosts(hosts, lowest_cur_block, PlayIterator.ITERATING_SETUP)
+
+        # if any hosts are in ITERATING_TASKS, return the next normal
+        # task for these hosts, while all other hosts get a noop
+        if num_tasks:
+            display.debug("advancing hosts in ITERATING_TASKS")
+            return _advance_selected_hosts(hosts, lowest_cur_block, PlayIterator.ITERATING_TASKS)
+
+        # if any hosts are in ITERATING_RESCUE, return the next rescue
+        # task for these hosts, while all other hosts get a noop
+        if num_rescue:
+            display.debug("advancing hosts in ITERATING_RESCUE")
+            return _advance_selected_hosts(hosts, lowest_cur_block, PlayIterator.ITERATING_RESCUE)
+
+        # if any hosts are in ITERATING_ALWAYS, return the next always
+        # task for these hosts, while all other hosts get a noop
+        if num_always:
+            display.debug("advancing hosts in ITERATING_ALWAYS")
+            return _advance_selected_hosts(hosts, lowest_cur_block, PlayIterator.ITERATING_ALWAYS)
+
+        # at this point, everything must be ITERATING_COMPLETE, so we
+        # return None for all hosts in the list
+        display.debug("all hosts are done, so returning None's for all hosts")
+        return [(host, None) for host in hosts]
 
     def _check_action_state(self):
         """
@@ -122,7 +278,6 @@ class StrategyModule(LinearStrategyModule):
                 if self._run_state == State.STOP:
                     display.vv("terminated by the user")
                     return result
-
 
                 display.debug("getting the remaining hosts for this loop")
                 hosts_left = self.get_hosts_left(iterator)
@@ -188,7 +343,7 @@ class StrategyModule(LinearStrategyModule):
                         # all hosts currently being iterated over rather than one host
                         results.extend(self._execute_meta(task, play_context, iterator, host))
                         if task.args.get('_raw_params', None) not in (
-                        'noop', 'reset_connection', 'end_host', 'role_complete'):
+                                'noop', 'reset_connection', 'end_host', 'role_complete'):
                             run_once = True
                         if (task.any_errors_fatal or run_once) and not task.ignore_errors:
                             any_errors_fatal = True
@@ -360,7 +515,7 @@ class StrategyModule(LinearStrategyModule):
                         self._tqm.send_callback('v2_playbook_on_no_hosts_remaining')
                         result |= self._tqm.RUN_FAILED_BREAK_PLAY
                     display.debug('(%s failed / %s total )> %s max fail' % (
-                    len(self._tqm._failed_hosts), iterator.batch_size, percentage))
+                        len(self._tqm._failed_hosts), iterator.batch_size, percentage))
                 display.debug("done checking for max_fail_percentage")
 
                 display.debug("checking to see if all hosts have failed and the running result is not ok")
