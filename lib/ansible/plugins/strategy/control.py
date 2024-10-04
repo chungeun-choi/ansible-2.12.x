@@ -24,7 +24,6 @@ import time
 from collections import deque
 from enum import Enum, auto
 from ansible import constants as C
-from ansible.errors import AnsibleError
 from ansible.module_utils._text import to_text
 from ansible.playbook.included_file import IncludedFile
 from ansible.executor.play_iterator import PlayIterator
@@ -36,11 +35,12 @@ from ansible.plugins.loader import action_loader
 from ansible.plugins.strategy import StrategyBase
 from ansible.template import Templar
 from ansible.utils.display import Display
+from ansible import context
 
 display = Display()
 
 # A queue for managing the state of a strategy.
-state_queue = deque()
+state_queues = dict()
 
 DOCUMENTATIONS = ''''''
 
@@ -52,27 +52,35 @@ class State(Enum):
     RESTART = auto()
 
 
-class StateManager:
+class StateQueueManager:
     """
     StateManager is a class designed to control the tasks of a running play.
     The primary goal of this class is to safely insert data into a globally initialized state_queue.
     Users can request one of the four states—start, pause, restart, or stop—through the 'update_state' function.
     """
 
-    def __init__(self):
-        self.queue = state_queue
+    def __init__(self, executor_id: str = None):
+        self._executor_id = executor_id or context.CLIARGS.get("executor_id",None)
+        if not self._executor_id:
+            raise AnsibleError("No executor id specified")
+
+        state_queues[executor_id] = deque()
+        self._queue = state_queues[executor_id]
 
     def update_state(self, state):
         if state == "start":
-            self.queue.append(State.RUN)
+            self._queue.append(State.RUN)
         elif state == "pause":
-            self.queue.append(State.STOP)
+            self._queue.append(State.STOP)
         elif state == "restart":
-            self.queue.append(State.RESTART)
+            self._queue.append(State.RESTART)
         elif state == "stop":
-            self.queue.append(State.STOP)
+            self._queue.append(State.STOP)
         else:
             raise Exception("Invalid state for queueing state")
+
+    def __del__(self):
+        del state_queues[self._executor_id]
 
 
 class StrategyModule(StrategyBase):
@@ -84,6 +92,9 @@ class StrategyModule(StrategyBase):
 
     def __init__(self, tqm):
         super(StrategyModule, self).__init__(tqm)
+        self._executor_id = (context.CLIARGS.get("executor_id", None)
+                             or self._variable_manager.extra_vars.get("executor_id", None))
+        self._queue = state_queues[self._executor_id]
         self._run_state = State.RUN
         self.noop_task = None
 
@@ -241,8 +252,8 @@ class StrategyModule(StrategyBase):
         object.
         """
         while True:
-            if state_queue:
-                self._run_state = state_queue.pop()
+            if self._queue:
+                self._run_state = self._queue.pop()
                 if self._run_state == State.PAUSE:
                     time.sleep(C.DEFAULT_INTERNAL_POLL_INTERVAL)
                 elif self._run_state == State.RESTART or self._run_state == State.RUN:
