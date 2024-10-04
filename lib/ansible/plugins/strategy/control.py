@@ -71,7 +71,7 @@ class StateQueueManager:
         if state == "start":
             self._queue.append(State.RUN)
         elif state == "pause":
-            self._queue.append(State.STOP)
+            self._queue.append(State.PAUSE)
         elif state == "restart":
             self._queue.append(State.RESTART)
         elif state == "stop":
