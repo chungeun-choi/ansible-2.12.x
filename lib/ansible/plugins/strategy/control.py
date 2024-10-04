@@ -21,7 +21,7 @@ __metaclass__ = type
 
 import time
 
-from collections import deque
+from queue import Queue
 from enum import Enum, auto
 from ansible import constants as C
 from ansible.module_utils._text import to_text
@@ -60,22 +60,22 @@ class StateQueueManager:
     """
 
     def __init__(self, executor_id: str = None):
-        self._executor_id = executor_id or context.CLIARGS.get("executor_id",None)
+        self._executor_id = executor_id or context.CLIARGS.get("executor_id", None)
         if not self._executor_id:
             raise AnsibleError("No executor id specified")
 
-        state_queues[executor_id] = deque()
+        state_queues[executor_id] = Queue()
         self._queue = state_queues[executor_id]
 
     def update_state(self, state):
         if state == "start":
-            self._queue.append(State.RUN)
+            self._queue.put(State.RUN)
         elif state == "pause":
-            self._queue.append(State.PAUSE)
+            self._queue.put(State.PAUSE)
         elif state == "restart":
-            self._queue.append(State.RESTART)
+            self._queue.put(State.RESTART)
         elif state == "stop":
-            self._queue.append(State.STOP)
+            self._queue.put(State.STOP)
         else:
             raise Exception("Invalid state for queueing state")
 
@@ -252,8 +252,8 @@ class StrategyModule(StrategyBase):
         object.
         """
         while True:
-            if self._queue:
-                self._run_state = self._queue.pop()
+            if not self._queue.empty():
+                self._run_state = self._queue.get(block=False)
                 if self._run_state == State.PAUSE:
                     time.sleep(C.DEFAULT_INTERNAL_POLL_INTERVAL)
                 elif self._run_state == State.RESTART or self._run_state == State.RUN:
