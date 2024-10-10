@@ -289,6 +289,8 @@ class StrategyModule(StrategyBase):
                 # check if data exists in the 'state_queue'
                 display.debug("check whether to execute the next task")
                 self._check_action_state()
+                if self._run_state == State.STOP:
+                    break
 
                 display.debug("getting the remaining hosts for this loop")
                 hosts_left = self.get_hosts_left(iterator)
