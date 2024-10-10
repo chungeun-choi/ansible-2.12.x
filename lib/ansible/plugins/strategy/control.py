@@ -255,10 +255,12 @@ class StrategyModule(StrategyBase):
             if not self._queue.empty():
                 self._run_state = self._queue.get(block=False)
                 if self._run_state == State.PAUSE:
+                    display.display("The pause command has been invoked. Pausing now.")
                     time.sleep(C.DEFAULT_INTERNAL_POLL_INTERVAL)
                 elif self._run_state == State.RESTART or self._run_state == State.RUN:
                     break
                 elif self._run_state == State.STOP:
+                    display.display("The stop command has been invoked. Cleaning up resources and exiting. ")
                     self.cleanup()
                     break
                 else:
@@ -269,6 +271,7 @@ class StrategyModule(StrategyBase):
                 elif self._run_state == State.RESTART or self._run_state == State.RUN:
                     break
                 elif self._run_state == State.STOP:
+                    display.vv("terminated by the user")
                     self.cleanup()
                     break
                 else:
@@ -286,9 +289,6 @@ class StrategyModule(StrategyBase):
                 # check if data exists in the 'state_queue'
                 display.debug("check whether to execute the next task")
                 self._check_action_state()
-                if self._run_state == State.STOP:
-                    display.vv("terminated by the user")
-                    return result
 
                 display.debug("getting the remaining hosts for this loop")
                 hosts_left = self.get_hosts_left(iterator)
