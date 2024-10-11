@@ -262,13 +262,13 @@ class StrategyModule(StrategyBase):
 
             if self._run_state == State.PAUSE:
                 if is_new_action:
-                    display.display("The pause command has been invoked. Pausing now.")
+                    display.display("The pause request has been invoked. Pausing now.")
                 time.sleep(C.DEFAULT_INTERNAL_POLL_INTERVAL)
             elif self._run_state == State.RESTART or self._run_state == State.RUN:
                 break
             elif self._run_state == State.STOP:
                 if is_new_action:
-                    display.display("The pause command has been invoked. Pausing now.")
+                    display.display("The stop request has been invoked. Stopping now.")
                 self.cleanup()
                 break
             else:
