@@ -251,31 +251,28 @@ class StrategyModule(StrategyBase):
         'state_queue', the task action proceeds using the initialized 'self._run_state' value of the
         object.
         """
+        is_new_action = False
+
         while True:
             if not self._queue.empty():
+                is_new_action = True
                 self._run_state = self._queue.get(block=False)
-                if self._run_state == State.PAUSE:
-                    display.display("The pause command has been invoked. Pausing now.")
-                    time.sleep(C.DEFAULT_INTERNAL_POLL_INTERVAL)
-                elif self._run_state == State.RESTART or self._run_state == State.RUN:
-                    break
-                elif self._run_state == State.STOP:
-                    display.display("The stop command has been invoked. Cleaning up resources and exiting. ")
-                    self.cleanup()
-                    break
-                else:
-                    raise Exception("Invalid state for queueing state")
             else:
-                if self._run_state == State.PAUSE:
-                    time.sleep(C.DEFAULT_INTERNAL_POLL_INTERVAL)
-                elif self._run_state == State.RESTART or self._run_state == State.RUN:
-                    break
-                elif self._run_state == State.STOP:
-                    display.vv("terminated by the user")
-                    self.cleanup()
-                    break
-                else:
-                    raise Exception("Invalid state for queueing state")
+                is_new_action = False
+
+            if self._run_state == State.PAUSE:
+                if is_new_action:
+                    display.display("The pause command has been invoked. Pausing now.")
+                time.sleep(C.DEFAULT_INTERNAL_POLL_INTERVAL)
+            elif self._run_state == State.RESTART or self._run_state == State.RUN:
+                break
+            elif self._run_state == State.STOP:
+                if is_new_action:
+                    display.display("The pause command has been invoked. Pausing now.")
+                self.cleanup()
+                break
+            else:
+                raise Exception("Invalid state for queueing state")
 
     def run(self, iterator, play_context):
         # iterate over each task, while there is one left to run
